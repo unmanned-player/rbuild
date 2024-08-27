@@ -291,7 +291,7 @@ rb_sync()
 	rb_prep_exclist
 
 	r_args="-chlrz"
-	if [ $rb_verbosity -ge 2 ]; then
+	if [ $rb_verbosity -ge 4 ]; then
 		r_args="${r_args} -v --progress"
 	else
 		r_args="${r_args} -q"
@@ -357,11 +357,9 @@ rb_init()
 		rb_method="cmake"
 	elif [ -f "${ldir_src}/configure.ac" ]; then
 		rb_method="auto"
-	elif [ -f "${ldir_src}/Makefile" ] || [ -f "${ldir_src}/GNUMakefile" ]; then
-		rb_method="make"
 	else
 		echo "Could not recognise build method."
-		echo "No Makefile/CMakeLists.txt/configure.ac found in ${ldir_src}"
+		echo "No CMakeLists.txt/configure.ac found in ${ldir_src}"
 		exit 1
 	fi
 
@@ -413,15 +411,16 @@ rb_init()
 
 		RB_JOBS=${__saved_jobs}
 	fi
+
+	if [ ! -z "${INSTALL_DIR}" ]; then
+		rdir_ins=${INSTALL_DIR}
+	fi
 }
 
 # Reset remote site
 rb_reset()
 {
 	rm_cmd="rm -rf"
-	if [ ${rb_verbosity} -ge 2 ]; then
-		rm_cmd="${rm_cmd} -v"
-	fi
 
 	if [ ${__rb_reset_level} -eq 1 ]; then
 		if [ "${rb_method}" = "cmake" ]; then
@@ -445,13 +444,11 @@ rb_reset()
 			fi
 
 			ssh_call "Reset-1" "${RB_BHOST}" "${args}"
-		elif [ "${rb_method}" = "auto" ] || [ "${rb_method}" = "make" ]; then
+		elif [ "${rb_method}" = "auto" ] then
 			args="make"
 			args="${args} -C${rdir_bin}"
 			args="${args} -j${RB_JOBS}"
 
-			# We assume both handmade Makefile and autotools generated Makefile
-			# use `V=1` to enable verbosity.
 			if [ ${rb_verbosity} -ge 2 ]; then
 				args="${args} V=1"
 			fi
@@ -550,7 +547,7 @@ auto_config()
 	cmd=
 	cmd="${envs} ${rdir_src}/configure"
 	cmd="${cmd} --prefix=${rdir_ins}"
-	if [ -z "${AUTO_EXTRA_CONFIGURE_ARGS}" ]; then
+	if [ ! -z "${AUTO_EXTRA_CONFIGURE_ARGS}" ]; then
 		cmd="${cmd} ${AUTO_EXTRA_CONFIGURE_ARGS}"
 	fi
 	ssh_call "Configure" \
@@ -576,9 +573,9 @@ cmake_config()
 	else
 		args="${args} ${CMAKE_EXE}"
 	fi
-	args="${args} -S${rdir_src}"
+	args="${args} -H${rdir_src}"
 	args="${args} -B${rdir_bin}"
-	args="${args} -Werror=dev"
+	# args="${args} -Werror=dev"
 	args="${args} --warn-uninitialized"
 	args="${args} --no-warn-unused-cli"
 
@@ -615,12 +612,12 @@ cmake_config()
 	# through rbuild CLI. For large projects, this will print way too many
 	# lines obstructing the real stuff. Should this be configured here under
 	# `-v` settings?
-	if [ ${rb_verbosity} -ge 2 ]; then
-		args="${args} -DCMAKE_INSTALL_MESSAGE=ALWAYS"
-	else
-		args="${args} -DCMAKE_INSTALL_MESSAGE=NEVER"
-	fi
-
+	# if [ ${rb_verbosity} -ge 2 ]; then
+	# 	args="${args} -DCMAKE_INSTALL_MESSAGE=ALWAYS"
+	# else
+	# 	args="${args} -DCMAKE_INSTALL_MESSAGE=NEVER"
+	# fi
+	args="${args} -DCMAKE_INSTALL_MESSAGE=ALWAYS"
 	args="${args} -DCMAKE_INSTALL_DEFAULT_COMPONENT_NAME=devel"
 
 	args="${args} -DCMAKE_INSTALL_PREFIX=${rdir_ins}"
@@ -637,18 +634,13 @@ cmake_config()
 	ssh_call "Configure" "${RB_BHOST}" "${args}"
 }
 
-make_config()
-{
-	:
-}
-
 auto_build()
 {
 	args=
 
 	args="-C${rdir_bin}"
 	args="${args} -j${RB_JOBS}"
-	if [ ${rb_verbosity} -ge 3 ]; then
+	if [ ${rb_verbosity} -ge 2 ]; then
 		args="${args} V=1"
 	fi
 	args="${args} GIT_REVISION=${GIT_REVISION}"
@@ -689,61 +681,20 @@ cmake_build()
 
 	# On Ninja, if `-j` is left unspecified, it will run as many parallel jobs
 	# as there are CPUs on the build machine. Not ideal.
-	args_b="${args_b} -j ${RB_JOBS}"
-	if [ ${rb_verbosity} -ge 3 ]; then
-		args_b="${args_b} -v"
-		args_i="${args_i} -v"
+	# args_b="${args_b} -j ${RB_JOBS}"
+	if [ "${CMAKE_GENERATOR}" == "Ninja" ]; then
+		args_b="${args_b} -- -k128"
 	fi
-
-	ssh_call "Build" "${RB_BHOST}" "${args_b} && ${args_i} --component devel && ${args_i} --component testing"
-}
-
-make_build()
-{
-	args=
-	env=""
-
-	if [ ! -z "${CC}" ]; then
-		env="${env} CC=${CC}"
-	fi
-	if [ ! -z "${CXX}" ]; then
-		env="${env} CXX=${CXX}"
-	fi
-	if [ ! -z "${AR}" ]; then
-		env="${env} AR=${AR}"
-	fi
-	if [ ! -z "${RANLIB}" ]; then
-		env="${env} RANLIB=${RANLIB}"
-	fi
-	if [ ! -z "${NM}" ]; then
-		env="${env} NM=${NM}"
-	fi
-	if [ ! -z "${LINKER}" ]; then
-		env="${env} LINKER=${LINKER}"
-	fi
-	if [ ! -z "${CCAS}" ]; then
-		env="${env} CCAS=${CCAS}"
-	fi
-	if [ ! -z "${CFLAGS}" ]; then
-		env="${env} CFLAGS=\"${CFLAGS}\""
-	fi
-
-	args="cd ${rdir_src};"
-	args="${args} ${env} gmake"
-	args="${args} -j${RB_JOBS}"
-	args="${args} DIR_BIN=${rdir_bin}"
-	args="${args} PREFIX=${rdir_ins}"
 	if [ ${rb_verbosity} -ge 2 ]; then
-		args="${args} V=1"
-	fi
-	if [ ! -z "${GMAKE_EXTRAS}" ]; then
-		args="${args} ${GMAKE_EXTRAS}"
-	fi
-	if [ ! -z "${rb_target}" ]; then
-		args="${args} -t ${rb_target}"
+		if [ "${CMAKE_GENERATOR}" == "Ninja" ]; then
+			args_b="${args_b} -v"
+			args_i="${args_i} -v"
+		else
+			args_b="${args_b} -- VERBOSE=1"
+		fi
 	fi
 
-	ssh_call "Build" "${RB_BHOST}" "${args}"
+	ssh_call "Build" "${RB_BHOST}" "${args_b} && ${args_i}"
 }
 
 auto_test()
@@ -751,8 +702,8 @@ auto_test()
 	args=
 
 	args="-C${rdir_bin}"
-	args="${args} -j${RB_JOBS}"
-	if [ ${rb_verbosity} -ge 4 ]; then
+	# args="${args} -j${RB_JOBS}"
+	if [ ${rb_verbosity} -ge 3 ]; then
 		args="${args} V=1"
 	fi
 	args="${args} GIT_REVISION=${GIT_REVISION}"
@@ -795,16 +746,11 @@ cmake_test()
 	ssh_call "Test" "${RB_BHOST}" "cd ${rdir_bin}; ${args}"
 }
 
-make_test()
-{
-	:
-}
-
 auto_package()
 {
 	args=
 
-	if [ ${rb_verbosity} -ge 4 ]; then
+	if [ ${rb_verbosity} -ge 3 ]; then
 		args="${args} -v"
 	fi
 	args="${args} -caf"
@@ -833,12 +779,7 @@ cmake_package()
 
 	# args="${args} -DCPACK_THREADS=${RB_JOBS}"
 
-	ssh_call "Package" "${RB_BHOST}" "cd ${rdir_bin} && ${CPACK_EXE} -G RPM ${args}"
-}
-
-make_package()
-{
-	:
+	ssh_call "Package" "${RB_BHOST}" "cd ${rdir_bin} && ${CPACK_EXE} -G TGZ ${args}"
 }
 
 rb_deploy()
@@ -848,7 +789,7 @@ rb_deploy()
 	s_args= # For SSH
 
 	r_args="-avz"
-	if [ $rb_verbosity -ge 2 ]; then
+	if [ $rb_verbosity -ge 3 ]; then
 		r_args="${r_args} -v --progress"
 	else
 		r_args="${r_args} -q"
